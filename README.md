@@ -111,21 +111,21 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## Changelog
 
-### v3.4.0 (Latest)
-- Security fixes for webhook parsing
-- Improved invoice ID resolution
-- Enhanced error logging
-- Fixed currency handling for BDT payments
+### v3.0.2 (Latest)
+- Initial stable release
+- Basic payment processing
+- USD and BDT currency support
+- Simple webhook integration
 
-### v3.3.0
-- Added BDT currency support
-- Real-time exchange rate integration
-- Improved payment verification
+### v3.0.1
+- Minor bug fixes
+- Documentation improvements
+- Security enhancements
 
-### v3.2.0
-- Enhanced security features
-- Better error handling
-- Improved documentation
+### v3.0.0
+- Initial development release
+- Basic functionality
+- Proof of concept
 
 ## File Structure
 
@@ -167,5 +167,5 @@ This extension is provided as-is without warranty. Use at your own risk. Always 
 
 ---
 
-Contributions: 
-Anyone is open to contribute and open PR. 
+## Contributions
+Anyone is open to contribute and open PR.
