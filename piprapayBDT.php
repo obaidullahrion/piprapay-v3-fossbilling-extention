@@ -1,7 +1,7 @@
 <?php
 
 /**
- * PipraPay FOSSBilling Gateway Module
+ * PipraPay FOSSBilling Gateway Module - BDT Version
  *
  * Website: https://webfuran.com
  * Email: support@webfuran.com
@@ -11,13 +11,14 @@
  * SECURITY FIXES IN v3.4.0:
  * - Fixed webhook parsing for PipraPay JSON payload
  * - Added proper invoice_id resolution from multiple sources
+ * - Fixed currency handling (BDT payments)
  * - Added idempotency check to prevent duplicate processing
  * - Added proper amount verification from API response
  * - Added comprehensive error logging
  * - Fixed metadata handling when API returns empty array
  */
 
-class Payment_Adapter_piprapay extends Payment_AdapterAbstract implements \FOSSBilling\InjectionAwareInterface
+class Payment_Adapter_piprapayBDT extends Payment_AdapterAbstract implements \FOSSBilling\InjectionAwareInterface
 {
     private $config = [];
 
@@ -50,7 +51,7 @@ class Payment_Adapter_piprapay extends Payment_AdapterAbstract implements \FOSSB
         $this->config['api_url'] = preg_replace('/^http:\/\//i', 'https://', $this->config['api_url']);
 
         if (!isset($this->config['currency'])) {
-            $this->config['currency'] = 'USD';
+            $this->config['currency'] = 'BDT';
         }
     }
 
@@ -59,9 +60,9 @@ class Payment_Adapter_piprapay extends Payment_AdapterAbstract implements \FOSSB
         return [
             'supports_one_time_payments' => true,
             'supports_subscriptions' => false,
-            'description' => 'Accept payments via PipraPay',
+            'description' => 'Accept payments via piprapay (BDT)',
             'logo' => [
-                'logo' => 'piprapay/dollar.png',
+                'logo' => 'piprapay/taka.png',
                 'height' => '50px',
                 'width' => '50px',
             ],
@@ -83,7 +84,7 @@ class Payment_Adapter_piprapay extends Payment_AdapterAbstract implements \FOSSB
                     'text', [
                         'label' => 'Currency (BDT/USD):',
                         'required' => true,
-                        'value' => 'USD',
+                        'value' => 'BDT',
                     ],
                 ],
             ],
@@ -189,7 +190,9 @@ class Payment_Adapter_piprapay extends Payment_AdapterAbstract implements \FOSSB
             return true; // Already processed, not an error
         }
 
-        // STEP 7: Get payment amount from verified API response
+        // STEP 7: Get payment amount
+        // Use the actual verified amount from API response
+        // BUG FIX: Handle BDT amount properly
         $paymentAmount = $this->getPaymentAmount($payment, $invoice);
         $this->logInfo('Payment amount calculated', ['amount' => $paymentAmount]);
 
@@ -200,7 +203,7 @@ class Payment_Adapter_piprapay extends Payment_AdapterAbstract implements \FOSSB
             'txn_status' => $payment['status'],
             'txn_id' => $payment['transaction_id'] ?? $pp_id,
             'amount' => $paymentAmount,
-            'currency' => $payment['currency'] ?? $this->config['currency'],
+            'currency' => $payment['currency'] ?? 'BDT',
             'type' => $payment['gateway'] ?? 'piprapay',
             'status' => 'complete',
         ];
@@ -238,7 +241,7 @@ class Payment_Adapter_piprapay extends Payment_AdapterAbstract implements \FOSSB
             'invoice_id' => $invoiceId,
             'pp_id' => $pp_id,
             'amount' => $paymentAmount,
-            'currency' => $payment['currency'] ?? $this->config['currency'],
+            'currency' => $payment['currency'] ?? 'BDT',
         ]);
 
         return true;
@@ -352,25 +355,61 @@ class Payment_Adapter_piprapay extends Payment_AdapterAbstract implements \FOSSB
             }
         }
 
+        // Priority 4: Fallback - use invoice_id from data if available
+        // This handles cases where metadata is empty but we have invoice_id
+        if (!empty($data['invoice_id'])) {
+            return (int) $data['invoice_id'];
+        }
+
         return null;
     }
 
     /**
-     * Get payment amount from verified API response
+     * Get payment amount for wallet credit
      * 
-     * @param array $payment Verified payment from API
+     * IMPORTANT: Use the USD amount stored in metadata during payment creation.
+     * The BDT amount from PipraPay API is only for display/reference.
+     * 
+     * Example:
+     * - Invoice: $30 USD
+     * - Payment: 3670 BDT (30 × 122 exchange rate)
+     * - Wallet should be credited: $30 USD (NOT 3670 USD!)
+     * 
+     * @param array $payment Verified payment from API (contains BDT amount)
      * @param object $invoice Invoice object
-     * @return float Payment amount
+     * @return float Payment amount in system currency (USD)
      */
     private function getPaymentAmount(array $payment, $invoice): float
     {
-        // Use the amount from API response if available
-        if (!empty($payment['amount'])) {
-            return round((float) $payment['amount'], 2);
+        // PRIORITY 1: Use USD amount from metadata (stored during payment creation)
+        // This is the most reliable source for the original USD amount
+        $metadata = $payment['metadata'] ?? null;
+        if (is_array($metadata) && !empty($metadata['usd_amount'])) {
+            return round((float) $metadata['usd_amount'], 2);
         }
         
-        // Fallback to invoice total
-        return round((float) $invoice->total, 2);
+        // PRIORITY 2: Use invoice total (may be 0 if already processed)
+        $invoiceTotal = round((float) $invoice->total, 2);
+        if ($invoiceTotal > 0) {
+            return $invoiceTotal;
+        }
+        
+        // PRIORITY 3: Fallback - calculate from BDT amount using current rate
+        // This is less accurate but ensures we credit something
+        $bdtAmount = (float) ($payment['amount'] ?? 0);
+        if ($bdtAmount > 0) {
+            // Get current exchange rate
+            try {
+                $rate = $this->getUsdToBdtRate();
+                return round($bdtAmount / $rate, 2);
+            } catch (\Exception $e) {
+                // If rate fetch fails, use approximate rate
+                // This should rarely happen
+                return round($bdtAmount / 122, 2);
+            }
+        }
+        
+        return 0;
     }
 
     /**
@@ -382,8 +421,11 @@ class Payment_Adapter_piprapay extends Payment_AdapterAbstract implements \FOSSB
     private function preparePaymentData($invoice): array
     {
         $client = $invoice['client'];
-        $amount = $invoice['total'];
-        $currency = $this->config['currency'];
+        $usdAmount = $invoice['total'];
+        
+        // Get BDT exchange rate and calculate BDT amount
+        $bdtRate = $this->getUsdToBdtRate();
+        $bdtAmount = round($usdAmount * $bdtRate);
 
         // WEBHOOK URL: Server-to-server notification endpoint
         // Append invoice_id so FOSSBilling can identify the invoice
@@ -393,6 +435,7 @@ class Payment_Adapter_piprapay extends Payment_AdapterAbstract implements \FOSSB
 
         // RETURN URL: User-friendly page after payment
         // Redirect user to the invoice page where they can see payment status
+        // Use thank_you_url if available, otherwise use redirect_url, or build invoice URL
         $returnUrl = $this->config['thank_you_url'] 
             ?? $this->config['redirect_url'] 
             ?? null;
@@ -418,17 +461,59 @@ class Payment_Adapter_piprapay extends Payment_AdapterAbstract implements \FOSSB
             'full_name' => trim(($client['first_name'] ?? '') . ' ' . ($client['last_name'] ?? '')),
             'email_address' => $client['email'] ?? '',
             'mobile_number' => !empty($client['phone']) ? $client['phone'] : '+8801000000000',
-            'amount' => (string) round($amount, 2),
-            'currency' => $currency,
+            'amount' => (string) $bdtAmount,
+            'currency' => 'BDT',
             'metadata' => [
                 'invoice_id' => (string) $invoice['id'],
                 'invoiceid' => (string) $invoice['id'],
+                'usd_amount' => (string) $usdAmount,
             ],
             'return_url' => $returnUrl,
             'return_type' => 'GET',
             'cancel_url' => $this->config['cancel_url'] ?? '',
             'webhook_url' => $webhookUrl,
         ];
+    }
+
+    /**
+     * Get USD to BDT exchange rate
+     * 
+     * @return float Exchange rate
+     * @throws Payment_Exception If rate cannot be fetched
+     */
+    private function getUsdToBdtRate(): float
+    {
+        $ch = curl_init();
+        curl_setopt_array($ch, [
+            CURLOPT_URL => 'https://open.er-api.com/v6/latest/USD',
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT => 10,
+            CURLOPT_SSL_VERIFYPEER => true, // SECURITY: Verify SSL certificate
+        ]);
+        $response = curl_exec($ch);
+        $curlError = curl_error($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+
+        if ($curlError) {
+            throw new Payment_Exception('Could not fetch exchange rate: ' . $curlError);
+        }
+
+        if ($httpCode !== 200) {
+            throw new Payment_Exception('Exchange rate API returned HTTP ' . $httpCode);
+        }
+
+        $rateData = json_decode($response, true);
+
+        if (
+            json_last_error() !== JSON_ERROR_NONE ||
+            ($rateData['result'] ?? '') !== 'success' ||
+            !isset($rateData['rates']['BDT'])
+        ) {
+            throw new Payment_Exception('Exchange rate API error: Unable to retrieve USD->BDT rate.');
+        }
+
+        return (float) $rateData['rates']['BDT'];
     }
 
     /**
@@ -444,7 +529,7 @@ class Payment_Adapter_piprapay extends Payment_AdapterAbstract implements \FOSSB
         $safe = htmlspecialchars($paymentUrl, ENT_QUOTES, 'UTF-8');
 
         $form = '<form action="' . $safe . '" method="GET" id="payment_form">';
-        $form .= '<input class="bb-button bb-button-submit" type="submit" value="Pay with PipraPay" id="payment_button"/>';
+        $form .= '<input class="bb-button bb-button-submit" type="submit" value="Pay with PipraPay (BDT)" id="payment_button"/>';
         $form .= '</form>';
 
         if (!empty($this->config['auto_redirect'])) {
@@ -553,7 +638,7 @@ class Payment_Adapter_piprapay extends Payment_AdapterAbstract implements \FOSSB
     private function logError(string $message, array $context = []): void
     {
         if ($this->di && isset($this->di['logger'])) {
-            $this->di['logger']->error('[PipraPay] ' . $message, $context);
+            $this->di['logger']->error('[PipraPayBDT] ' . $message, $context);
         }
     }
 
@@ -566,7 +651,7 @@ class Payment_Adapter_piprapay extends Payment_AdapterAbstract implements \FOSSB
     private function logInfo(string $message, array $context = []): void
     {
         if ($this->di && isset($this->di['logger'])) {
-            $this->di['logger']->info('[PipraPay] ' . $message, $context);
+            $this->di['logger']->info('[PipraPayBDT] ' . $message, $context);
         }
     }
 }
