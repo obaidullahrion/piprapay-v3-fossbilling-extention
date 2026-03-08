@@ -1,6 +1,6 @@
 <?php
 
-class Payment_Adapter_piprapayBDT extends Payment_AdapterAbstract implements \FOSSBilling\InjectionAwareInterface
+class Payment_Adapter_piprapayUSD extends Payment_AdapterAbstract implements \FOSSBilling\InjectionAwareInterface
 {
     private $config = [];
 
@@ -28,11 +28,10 @@ class Payment_Adapter_piprapayBDT extends Payment_AdapterAbstract implements \FO
             throw new Payment_Exception('The ":pay_gateway" payment gateway is not fully configured. Please configure the :missing', [':pay_gateway' => 'piprapay', ':missing' => 'API URL']);
         }
 
-        // SECURITY: Force HTTPS on api_url at construction time
         $this->config['api_url'] = preg_replace('/^http:\/\//i', 'https://', $this->config['api_url']);
 
         if (!isset($this->config['currency'])) {
-            $this->config['currency'] = 'BDT';
+            $this->config['currency'] = 'USD';
         }
     }
 
@@ -40,32 +39,32 @@ class Payment_Adapter_piprapayBDT extends Payment_AdapterAbstract implements \FO
     {
         return [
             'supports_one_time_payments' => true,
-            'supports_subscriptions' => false,
-            'description' => 'Accept payments via piprapay (BDT)',
-            'logo' => [
-                'logo' => 'piprapay/taka.png',
+            'supports_subscriptions'     => false,
+            'description'                => 'Accept payments via PipraPay',
+            'logo'                       => [
+                'logo'   => 'piprapay/dollar.png',
                 'height' => '50px',
-                'width' => '50px',
+                'width'  => '50px',
             ],
             'form' => [
                 'api_key' => [
                     'text', [
-                        'label' => 'API key:',
+                        'label'    => 'API key:',
                         'required' => true,
                     ],
                 ],
                 'api_url' => [
                     'text', [
-                        'label' => 'API URL (HTTPS only):',
+                        'label'    => 'API URL (HTTPS only):',
                         'required' => true,
-                        'value' => 'https://checkout.webfuran.com',
+                        'value'    => 'https://checkout.webfuran.com',
                     ],
                 ],
                 'currency' => [
                     'text', [
-                        'label' => 'Currency (BDT/USD):',
+                        'label'    => 'Currency (BDT/USD):',
                         'required' => true,
-                        'value' => 'BDT',
+                        'value'    => 'USD',
                     ],
                 ],
             ],
@@ -74,35 +73,22 @@ class Payment_Adapter_piprapayBDT extends Payment_AdapterAbstract implements \FO
 
     public function getHtml($api_admin, $invoice_id, $subscription)
     {
-        $invoice = $api_admin->invoice_get(['id' => $invoice_id]);
-        $data = $this->preparePaymentData($invoice);
+        $invoice    = $api_admin->invoice_get(['id' => $invoice_id]);
+        $data       = $this->preparePaymentData($invoice);
         $paymentUrl = $this->createCharge($data);
 
         return $this->generatePaymentForm($paymentUrl);
     }
 
-    /**
-     * Process Transaction - Main webhook/IPN handler
-     *
-     * Called by FOSSBilling's ServiceTransaction::processTransaction() for every
-     * incoming IPN. Both the webhook (server-to-server) and the return URL redirect
-     * (browser GET) hit ipn.php, which creates a NEW transaction row each time and
-     * then calls this method. That means this method can be called TWICE for the
-     * same PipraPay payment with DIFFERENT $id values — the old per-transaction
-     * idempotency check is therefore useless.
-     *
-     * FIX: Lock on pp_id FIRST using an atomic INSERT into a dedicated lock table,
-     * so only one call can proceed regardless of how many transaction rows exist.
-     */
     public function processTransaction($api_admin, $id, $data, $gateway_id)
     {
         $this->logInfo('processTransaction called', [
-            'id'         => $id,
-            'gateway_id' => $gateway_id,
-            'invoice_id' => $data['invoice_id'] ?? null,
-            'get'        => $data['get'] ?? [],
-            'post'       => $data['post'] ?? [],
-            'raw_preview'=> substr($data['http_raw_post_data'] ?? '', 0, 200),
+            'id'          => $id,
+            'gateway_id'  => $gateway_id,
+            'invoice_id'  => $data['invoice_id'] ?? null,
+            'get'         => $data['get'] ?? [],
+            'post'        => $data['post'] ?? [],
+            'raw_preview' => substr($data['http_raw_post_data'] ?? '', 0, 200),
         ]);
 
         // STEP 1: Parse IPN data
@@ -118,9 +104,9 @@ class Payment_Adapter_piprapayBDT extends Payment_AdapterAbstract implements \FO
         }
 
         $pp_id = $ipn['pp_id'];
-        $this->logInfo('IPN parsed successfully', ['pp_id' => $pp_id, 'ipn' => $ipn]);
+        $this->logInfo('IPN parsed successfully', ['pp_id' => $pp_id]);
 
-        // STEP 2: SECURITY — verify payment with PipraPay API
+        // STEP 2: Verify payment with PipraPay API
         $payment = $this->verifyPayment($pp_id);
         $this->logInfo('Payment verified with API', ['status' => $payment['status'] ?? 'unknown']);
 
@@ -135,9 +121,9 @@ class Payment_Adapter_piprapayBDT extends Payment_AdapterAbstract implements \FO
 
         if (empty($invoiceId)) {
             $this->logError('Cannot determine invoice ID', [
-                'data_invoice_id' => $data['invoice_id'] ?? null,
-                'ipn_invoice_id'  => $ipn['invoice_id'] ?? null,
-                'payment_metadata'=> $payment['metadata'] ?? null,
+                'data_invoice_id'  => $data['invoice_id'] ?? null,
+                'ipn_invoice_id'   => $ipn['invoice_id'] ?? null,
+                'payment_metadata' => $payment['metadata'] ?? null,
             ]);
             throw new Payment_Exception('Cannot determine invoice ID from payment data');
         }
@@ -152,42 +138,38 @@ class Payment_Adapter_piprapayBDT extends Payment_AdapterAbstract implements \FO
             'invoice_id'         => $invoice->id,
             'invoice_total'      => $invoice->total,
             'invoice_status'     => $invoice->status,
+            'invoice_type'       => $invoice->type,
             'transaction_id'     => $transaction->id,
             'transaction_status' => $transaction->status,
         ]);
 
-        // STEP 6: IDEMPOTENCY — lock on pp_id across ALL transaction rows
-        //
-        // Problem: ipn.php calls ServiceTransaction::createAndProcess() which always
-        // creates a BRAND NEW transaction row before calling this method. If both
-        // webhook and return-URL fire, two rows exist with different $id values.
-        // A per-row status check won't stop the second call.
-        //
-        // Solution: use an atomic INSERT into a pp_id lock table. Only the first
-        // INSERT succeeds; the second gets a duplicate-key error and we bail out.
+        // STEP 6: IDEMPOTENCY — atomic lock on pp_id
+        // ipn.php always creates a NEW transaction row per call, so two calls
+        // (webhook + return URL) get different $id values and a per-row check
+        // won't stop the duplicate. We lock on pp_id instead.
         $this->ensureLockTableExists();
 
         $locked = $this->acquirePaymentLock($pp_id, $id);
         if (!$locked) {
             $this->logInfo('Duplicate IPN suppressed — pp_id already processed', [
-                'pp_id' => $pp_id,
-                'txn_id'=> $id,
+                'pp_id'  => $pp_id,
+                'txn_id' => $id,
             ]);
             return true;
         }
 
-        // STEP 7: Calculate USD amount
+        // STEP 7: Get payment amount (straight USD — no conversion)
         $paymentAmount = $this->getPaymentAmount($payment, $invoice);
         $this->logInfo('Payment amount calculated', ['amount' => $paymentAmount]);
 
-        // STEP 8: Update transaction record with full details
+        // STEP 8: Update transaction record
         $tx_data = [
             'id'         => $id,
             'invoice_id' => $invoice->id,
             'txn_status' => $payment['status'],
             'txn_id'     => $payment['transaction_id'] ?? $pp_id,
             'amount'     => $paymentAmount,
-            'currency'   => $invoice->currency ?? 'USD',   // always USD in FOSSBilling
+            'currency'   => $invoice->currency ?? 'USD',
             'type'       => $payment['gateway'] ?? 'piprapay',
             'status'     => 'complete',
         ];
@@ -230,10 +212,11 @@ class Payment_Adapter_piprapayBDT extends Payment_AdapterAbstract implements \FO
         }
 
         $this->logInfo('Payment processed successfully', [
-            'invoice_id' => $invoiceId,
-            'is_deposit' => $isDeposit,
-            'pp_id'      => $pp_id,
-            'amount'     => $paymentAmount,
+            'invoice_id'  => $invoiceId,
+            'is_deposit'  => $isDeposit,
+            'pp_id'       => $pp_id,
+            'amount'      => $paymentAmount,
+            'currency'    => 'USD',
         ]);
 
         return true;
@@ -243,11 +226,6 @@ class Payment_Adapter_piprapayBDT extends Payment_AdapterAbstract implements \FO
     // PP_ID lock helpers
     // -------------------------------------------------------------------------
 
-    /**
-     * Create the piprapay_processed_payments lock table if it doesn't exist.
-     * This table stores one row per successfully processed pp_id and is the
-     * single source of truth for duplicate detection.
-     */
     private function ensureLockTableExists(): void
     {
         $this->di['db']->exec(
@@ -260,12 +238,6 @@ class Payment_Adapter_piprapayBDT extends Payment_AdapterAbstract implements \FO
         );
     }
 
-    /**
-     * Atomically claim a pp_id.
-     *
-     * Returns TRUE  if this call is the first to claim the pp_id (proceed).
-     * Returns FALSE if the pp_id was already claimed (duplicate — skip).
-     */
     private function acquirePaymentLock(string $pp_id, int $txn_id): bool
     {
         try {
@@ -273,9 +245,8 @@ class Payment_Adapter_piprapayBDT extends Payment_AdapterAbstract implements \FO
                 'INSERT INTO `piprapay_processed_payments` (`pp_id`, `txn_id`, `created_at`) VALUES (?, ?, ?)',
                 [$pp_id, $txn_id, date('Y-m-d H:i:s')]
             );
-            return true; // INSERT succeeded — first caller wins
+            return true;
         } catch (\Exception $e) {
-            // Duplicate primary key = already processed
             return false;
         }
     }
@@ -286,7 +257,6 @@ class Payment_Adapter_piprapayBDT extends Payment_AdapterAbstract implements \FO
 
     private function parseIpnData($data): array|false
     {
-        // SOURCE 1: Raw JSON webhook body (PRIMARY)
         $raw = $data['http_raw_post_data'] ?? '';
         if (!empty($raw)) {
             $ipn = json_decode($raw, true);
@@ -298,7 +268,6 @@ class Payment_Adapter_piprapayBDT extends Payment_AdapterAbstract implements \FO
             }
         }
 
-        // SOURCE 2: GET parameters (return URL redirect)
         $get = $data['get'] ?? [];
         if (!empty($get['pp_id'])) {
             return [
@@ -315,7 +284,6 @@ class Payment_Adapter_piprapayBDT extends Payment_AdapterAbstract implements \FO
             ];
         }
 
-        // SOURCE 3: POST body fallback
         $post = $data['post'] ?? [];
         if (!empty($post['pp_id'])) {
             return [
@@ -362,53 +330,27 @@ class Payment_Adapter_piprapayBDT extends Payment_AdapterAbstract implements \FO
     }
 
     // -------------------------------------------------------------------------
-    // Amount calculation (BDT → USD)
+    // Amount
     // -------------------------------------------------------------------------
 
-    /**
-     * Return the USD amount to credit.
-     *
-     * Priority:
-     *  1. usd_amount stored in PipraPay metadata at checkout time  ← most reliable
-     *  2. Invoice total                                             ← fallback
-     *  3. Live BDT→USD conversion of the payment amount            ← last resort
-     */
     private function getPaymentAmount(array $payment, $invoice): float
     {
-        $metadata = $payment['metadata'] ?? null;
-        if (is_array($metadata) && !empty($metadata['usd_amount'])) {
-            return round((float) $metadata['usd_amount'], 2);
+        if (!empty($payment['amount'])) {
+            return round((float) $payment['amount'], 2);
         }
 
-        $invoiceTotal = round((float) $invoice->total, 2);
-        if ($invoiceTotal > 0) {
-            return $invoiceTotal;
-        }
-
-        $bdtAmount = (float) ($payment['amount'] ?? 0);
-        if ($bdtAmount > 0) {
-            try {
-                $rate = $this->getUsdToBdtRate();
-                return round($bdtAmount / $rate, 2);
-            } catch (\Exception $e) {
-                return round($bdtAmount / 122, 2);
-            }
-        }
-
-        return 0;
+        return round((float) $invoice->total, 2);
     }
 
     // -------------------------------------------------------------------------
-    // Payment data preparation (USD → BDT for PipraPay)
+    // Payment data preparation
     // -------------------------------------------------------------------------
 
     private function preparePaymentData($invoice): array
     {
-        $client    = $invoice['client'];
-        $usdAmount = $invoice['total'];
-
-        $bdtRate   = $this->getUsdToBdtRate();
-        $bdtAmount = round($usdAmount * $bdtRate);
+        $client   = $invoice['client'];
+        $amount   = $invoice['total'];
+        $currency = $this->config['currency'];
 
         $webhookUrl = $this->config['notify_url'];
         $separator  = (strpos($webhookUrl, '?') !== false) ? '&' : '?';
@@ -431,58 +373,20 @@ class Payment_Adapter_piprapayBDT extends Payment_AdapterAbstract implements \FO
         }
 
         return [
-            'full_name'    => trim(($client['first_name'] ?? '') . ' ' . ($client['last_name'] ?? '')),
-            'email_address'=> $client['email'] ?? '',
-            'mobile_number'=> !empty($client['phone']) ? $client['phone'] : '+8801000000000',
-            'amount'       => (string) $bdtAmount,
-            'currency'     => 'BDT',
-            'metadata'     => [
+            'full_name'     => trim(($client['first_name'] ?? '') . ' ' . ($client['last_name'] ?? '')),
+            'email_address' => $client['email'] ?? '',
+            'mobile_number' => !empty($client['phone']) ? $client['phone'] : '+8801000000000',
+            'amount'        => (string) round($amount, 2),
+            'currency'      => $currency,
+            'metadata'      => [
                 'invoice_id' => (string) $invoice['id'],
                 'invoiceid'  => (string) $invoice['id'],
-                'usd_amount' => (string) $usdAmount,
             ],
-            'return_url'   => $returnUrl,
-            'return_type'  => 'GET',
-            'cancel_url'   => $this->config['cancel_url'] ?? '',
-            'webhook_url'  => $webhookUrl,
+            'return_url'    => $returnUrl,
+            'return_type'   => 'GET',
+            'cancel_url'    => $this->config['cancel_url'] ?? '',
+            'webhook_url'   => $webhookUrl,
         ];
-    }
-
-    // -------------------------------------------------------------------------
-    // Exchange rate
-    // -------------------------------------------------------------------------
-
-    private function getUsdToBdtRate(): float
-    {
-        $ch = curl_init();
-        curl_setopt_array($ch, [
-            CURLOPT_URL            => 'https://open.er-api.com/v6/latest/USD',
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_TIMEOUT        => 10,
-            CURLOPT_SSL_VERIFYPEER => true,
-        ]);
-        $response  = curl_exec($ch);
-        $curlError = curl_error($ch);
-        $httpCode  = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        curl_close($ch);
-
-        if ($curlError) {
-            throw new Payment_Exception('Could not fetch exchange rate: ' . $curlError);
-        }
-        if ($httpCode !== 200) {
-            throw new Payment_Exception('Exchange rate API returned HTTP ' . $httpCode);
-        }
-
-        $rateData = json_decode($response, true);
-        if (
-            json_last_error() !== JSON_ERROR_NONE ||
-            ($rateData['result'] ?? '') !== 'success' ||
-            !isset($rateData['rates']['BDT'])
-        ) {
-            throw new Payment_Exception('Exchange rate API error: Unable to retrieve USD->BDT rate.');
-        }
-
-        return (float) $rateData['rates']['BDT'];
     }
 
     // -------------------------------------------------------------------------
@@ -495,7 +399,7 @@ class Payment_Adapter_piprapayBDT extends Payment_AdapterAbstract implements \FO
         $safe = htmlspecialchars($paymentUrl, ENT_QUOTES, 'UTF-8');
 
         $form  = '<form action="' . $safe . '" method="GET" id="payment_form">';
-        $form .= '<input class="bb-button bb-button-submit" type="submit" value="Pay with PipraPay (BDT)" id="payment_button"/>';
+        $form .= '<input class="bb-button bb-button-submit" type="submit" value="Pay with PipraPay" id="payment_button"/>';
         $form .= '</form>';
 
         if (!empty($this->config['auto_redirect'])) {
@@ -552,7 +456,6 @@ class Payment_Adapter_piprapayBDT extends Payment_AdapterAbstract implements \FO
 
         $response = curl_exec($ch);
         $error    = curl_error($ch);
-        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         curl_close($ch);
 
         if ($error) {
@@ -574,14 +477,14 @@ class Payment_Adapter_piprapayBDT extends Payment_AdapterAbstract implements \FO
     private function logError(string $message, array $context = []): void
     {
         if ($this->di && isset($this->di['logger'])) {
-            $this->di['logger']->error('[PipraPayBDT] ' . $message, $context);
+            $this->di['logger']->error('[PipraPay] ' . $message, $context);
         }
     }
 
     private function logInfo(string $message, array $context = []): void
     {
         if ($this->di && isset($this->di['logger'])) {
-            $this->di['logger']->info('[PipraPayBDT] ' . $message, $context);
+            $this->di['logger']->info('[PipraPay] ' . $message, $context);
         }
     }
 }

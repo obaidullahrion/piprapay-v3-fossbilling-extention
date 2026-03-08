@@ -111,7 +111,17 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## Changelog
 
+
 ### v3.0.2 (Latest)
+- Fixed bug of wallet balance add
+- fixed bug of duplicate invoicing 
+- Fixed bug of currency issue
+
+
+
+
+
+### v3.0.2 
 - Initial stable release
 - Basic payment processing
 - USD and BDT currency support
